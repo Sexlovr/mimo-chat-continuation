@@ -21,15 +21,14 @@ import { buildAdminPage } from './lib/page.js';
 
 config();
 
-const app = express();
+var app = express();
 app.use(express.json({ limit: '10mb' }));
 
-const PORT = process.env.PORT || 3000;
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
-const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
-const CONV_TIMEOUT = parseInt(process.env.CONV_TIMEOUT_MINUTES) || 60;
+var PORT = process.env.PORT || 3000;
+var ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
+var JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
+var CONV_TIMEOUT = parseInt(process.env.CONV_TIMEOUT_MINUTES) || 60;
 
-// ── Round-robin counter (only for NEW conversations) ──
 var rrIndex = 0;
 
 function getNextAccount() {
@@ -263,9 +262,11 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
     var convKey = generateConvKey(cleanedMessages, headerConvId);
     var apiKeyHash = req.apiKeyHash;
 
+    // Look up existing conversation within timeout window
+    var timeoutModifier = '-' + CONV_TIMEOUT + ' minutes';
     var conv = db.prepare(
-      "SELECT * FROM conversations WHERE conv_key = ? AND api_key_hash = ? AND last_used > datetime('now', '-' || ? || ' minutes')"
-    ).get(convKey, apiKeyHash, CONV_TIMEOUT);
+      "SELECT * FROM conversations WHERE conv_key = ? AND api_key_hash = ? AND last_used > datetime('now', ?)"
+    ).get(convKey, apiKeyHash, timeoutModifier);
 
     var query, mimoConversationId, account;
     var isContinuation = false;
@@ -384,10 +385,10 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
 
     } else {
       // ═══ NON-STREAMING ═══
-      var thinkParser = new ThinkingParser(thinkingActive);
+      var thinkParser2 = new ThinkingParser(thinkingActive);
       var contentParts = [];
       var reasoningParts = [];
-      var usageData = null;
+      var usageData2 = null;
 
       for await (var event of parseMimoSSE(mimoResponse)) {
         if (event.event === 'message') {
@@ -395,7 +396,7 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
           try { parsed = JSON.parse(event.data); } catch (e) { continue; }
           if (parsed.type !== 'text' || parsed.content === undefined) continue;
 
-          var segments = thinkParser.process(parsed.content);
+          var segments = thinkParser2.process(parsed.content);
           for (var i = 0; i < segments.length; i++) {
             var seg = segments[i];
             if (seg.type === 'reasoning') reasoningParts.push(seg.text);
@@ -404,14 +405,14 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
         } else if (event.event === 'usage') {
           try {
             var u = JSON.parse(event.data);
-            usageData = {
+            usageData2 = {
               prompt_tokens: u.promptTokens || 0,
               completion_tokens: u.completionTokens || 0,
               total_tokens: u.totalTokens || 0
             };
           } catch (e) { }
         } else if (event.event === 'finish') {
-          var remaining = thinkParser.flush();
+          var remaining = thinkParser2.flush();
           for (var i = 0; i < remaining.length; i++) {
             var seg = remaining[i];
             if (seg.type === 'reasoning') reasoningParts.push(seg.text);
@@ -424,7 +425,7 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
         completionId, requestedModel,
         contentParts.join(''),
         reasoningParts.join('') || undefined,
-        usageData
+        usageData2
       );
 
       result['x_conversation_id'] = convKey;
