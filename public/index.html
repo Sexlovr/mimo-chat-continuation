@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MiMo2API — Admin</title>
+
+<!--LUMIVERSE_HTML_ISLAND_0-->
+
+let token = localStorage.getItem('mimo2api_token');
+
+const API = (path, opts = {}) => {
+  opts.headers = { ...opts.headers, 'Content-Type': 'application/json' };
+  if (token) opts.headers['Authorization'] = `Bearer ${token}`;
+  return fetch(path, opts).then(async r => {
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'Request failed');
+    return data;
+  });
+};
+
+function toast(msg, type = 'success') {
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3500);
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function maskKey(k) { return k.slice(0, 14) + '•'.repeat(12) + k.slice(-4); }
+function timeAgo(d) {
+  if (!d) return '—';
+  const s = Math.floor((Date.now() - new Date(d + 'Z').getTime()) / 1000);
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
+
+// ── Auth ──
+async function doLogin() {
+  try {
+    const data = await API('/admin/login', { method: 'POST', body: JSON.stringify({ password: document.getElementById('loginPassword').value }) });
+    token = data.token;
+    localStorage.setItem('mimo2api_token', token);
+    document.getElementById('loginOverlay').classList.add('hidden');
+    loadAll();
+  } catch (e) { document.getElementById('loginError').textContent = e.message; }
+}
+
+function logout() {
+  token = null;
+  localStorage.removeItem('mimo2api_token');
+  location.reload();
+}
+
+function checkAuth() {
+  if (token) {
+    document.getElementById('loginOverlay').classList.add('hidden');
+    loadAll();
+  }
+}
+
+// ── Tabs ──
+document.querySelectorAll('.sidebar a[data-tab]').forEach(a => {
+  a.addEventListener('click', e => {
+    e.preventDefault();
+    document.querySelectorAll('.sidebar a[data-tab]').forEach(x => x.classList.remove('active'));
+    a.classList.add('active');
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+    document.getElementById('tab-' + a.dataset.tab).classList.add('active');
+    if (a.dataset.tab === 'sessions') loadSessions();
+  });
+});
+
+// ── Load everything ──
+async function loadAll() {
+  document.getElementById('baseUrl').textContent = location.origin;
+  try { await loadAccounts(); } catch(e) { console.error(e); }
+  try { await loadKeys(); } catch(e) { console.error(e); }
+  try { await loadModels(); } catch(e) { console.error(e); }
+  try { await loadSessions(); } catch(e) { console.error(e); }
+}
+
+async function loadAccounts() {
+  const rows = await API('/admin/accounts');
+  document.getElementById('statAccounts').textContent = rows.filter(r => r.active).length;
+  document.getElementById('statRequests').textContent = rows.reduce((s, r) => s + (r.request_count || 0), 0);
+  document.getElementById('accountsTable').innerHTML = rows.length === 0
+    ? '<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:24px;">No accounts yet. Paste a cURL above.</td></tr>'
+    : rows.map(r => `<tr>
+    <td>${esc(r.label || '—')}</td>
+    <td class="mono">${esc(r.user_id)}</td>
+    <td><span class="badge ${r.active ? 'badge-green' : 'badge-red'}">${r.active ? 'Active' : 'Disabled'}</span></td>
+    <td>${r.request_count || 0}</td>
+    <td style="color:var(--text2)">${r.last_used ? timeAgo(r.last_used) : 'Never'}</td>
+    <td class="actions">
+      <button class="btn btn-toggle btn-sm" onclick="toggleAccount(${r.id},${r.active?0:1})">${r.active ? 'Disable' : 'Enable'}</button>
+      <button class="btn btn-danger btn-sm" onclick="deleteAccount(${r.id})">Delete</button>
+    </td>
+  </tr>`).join('');
+}
+
+async function loadKeys() {
+  const rows = await API('/admin/keys');
+  document.getElementById('statKeys').textContent = rows.filter(r => r.active).length;
+  document.getElementById('keysTable').innerHTML = rows.length === 0
+    ? '<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:24px;">No API keys. Generate one above.</td></tr>'
+    : rows.map(r => `<tr>
+    <td>${esc(r.name || '—')}</td>
+    <td><span class="mono" style="cursor:pointer" title="Click to copy full key" onclick="copyText('${esc(r.key)}')">${maskKey(r.key)}</span></td>
+    <td><span class="badge ${r.active ? 'badge-green' : 'badge-red'}">${r.active ? 'Active' : 'Disabled'}</span></td>
+    <td>${r.request_count || 0}</td>
+    <td style="color:var(--text2)">${timeAgo(r.created_at)}</td>
+    <td class="actions">
+      <button class="btn btn-toggle btn-sm" onclick="toggleKey(${r.id},${r.active?0:1})">${r.active ? 'Disable' : 'Enable'}</button>
+      <button class="btn btn-danger btn-sm" onclick="deleteKey(${r.id})">Delete</button>
+    </td>
+  </tr>`).join('');
+}
+
+async function loadModels() {
+  const rows = await API('/admin/models');
+  document.getElementById('statModels').textContent = rows.filter(r => r.active).length;
+  document.getElementById('modelsTable').innerHTML = rows.length === 0
+    ? '<tr><td colspan="4" style="text-align:center;color:var(--text3);padding:24px;">No models. Add one above.</td></tr>'
+    : rows.map(r => `<tr>
+    <td class="mono">${esc(r.model_id)}</td>
+    <td>${esc(r.display_name || r.model_id)}</td>
+    <td><span class="badge ${r.active ? 'badge-green' : 'badge-red'}">${r.active ? 'Listed' : 'Unlisted'}</span></td>
+    <td class="actions">
+      <button class="btn btn-toggle btn-sm" onclick="toggleModel(${r.id},${r.active?0:1})">${r.active ? 'Unlist' : 'List'}</button>
+      <button class="btn btn-danger btn-sm" onclick="deleteModel(${r.id})">Delete</button>
+    </td>
+  </tr>`).join('');
+}
+
+async function loadSessions() {
+  try {
+    const rows = await API('/admin/conversations');
+    document.getElementById('statConversations').textContent = rows.length;
+    document.getElementById('sessionsTable').innerHTML = rows.length === 0
+      ? '<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:24px;">No active sessions.</td></tr>'
+      : rows.map(r => `<tr>
+      <td class="mono" title="${esc(r.conv_key)}">${esc(r.conv_key.slice(0, 16))}…</td>
+      <td>${esc(r.account_label || '?')} <span style="color:var(--text3)">(${esc(r.user_id || '?')})</span></td>
+      <td><span class="badge badge-blue">${esc(r.model || '?')}</span></td>
+      <td>${r.message_count}</td>
+      <td style="color:var(--text2)">${timeAgo(r.last_used)}</td>
+      <td style="color:var(--text3)">${timeAgo(r.created_at)}</td>
+    </tr>`).join('');
+  } catch { /* sessions tab might fail if no convs table yet */ }
+}
+
+// ── CRUD Actions ──
+async function addAccount() {
+  const curl = document.getElementById('accountCurl').value;
+  const label = document.getElementById('accountLabel').value;
+  if (!curl.trim()) return toast('Paste a cURL command', 'error');
+  try {
+    await API('/admin/accounts', { method: 'POST', body: JSON.stringify({ curl, label }) });
+    document.getElementById('accountCurl').value = '';
+    document.getElementById('accountLabel').value = '';
+    toast('Account added!');
+    loadAccounts();
+  } catch (e) { toast(e.message, 'error'); }
+}
+async function toggleAccount(id, active) { await API(`/admin/accounts/${id}`, { method: 'PATCH', body: JSON.stringify({ active: !!active }) }); loadAccounts(); }
+async function deleteAccount(id) { if (!confirm('Delete this account? Related sessions will also be removed.')) return; await API(`/admin/accounts/${id}`, { method: 'DELETE' }); toast('Deleted'); loadAccounts(); loadSessions(); }
+
+async function createKey() {
+  const name = document.getElementById('keyName').value;
+  try {
+    const data = await API('/admin/keys', { method: 'POST', body: JSON.stringify({ name }) });
+    document.getElementById('keyName').value = '';
+    await navigator.clipboard.writeText(data.key).catch(() => {});
+    toast('Key created & copied to clipboard!');
+    loadKeys();
+  } catch (e) { toast(e.message, 'error'); }
+}
+async function toggleKey(id, active) { await API(`/admin/keys/${id}`, { method: 'PATCH', body: JSON.stringify({ active: !!active }) }); loadKeys(); }
+async function deleteKey(id) { if (!confirm('Delete this API key?')) return; await API(`/admin/keys/${id}`, { method: 'DELETE' }); toast('Deleted'); loadKeys(); }
+
+async function addModel() {
+  const model_id = document.getElementById('modelId').value.trim();
+  const display_name = document.getElementById('modelName').value.trim();
+  if (!model_id) return toast('Model ID required', 'error');
+  try {
+    await API('/admin/models', { method: 'POST', body: JSON.stringify({ model_id, display_name }) });
+    document.getElementById('modelId').value = '';
+    document.getElementById('modelName').value = '';
+    toast('Model added!');
+    loadModels();
+  } catch (e) { toast(e.message, 'error'); }
+}
+async function toggleModel(id, active) { await API(`/admin/models/${id}`, { method: 'PATCH', body: JSON.stringify({ active: !!active }) }); loadModels(); }
+async function deleteModel(id) { if (!confirm('Remove this model?')) return; await API(`/admin/models/${id}`, { method: 'DELETE' }); toast('Deleted'); loadModels(); }
+
+async function clearConversations() {
+  if (!confirm('Clear all tracked sessions? This will NOT delete MiMo-side history.')) return;
+  try { await API('/admin/conversations', { method: 'DELETE' }); toast('Sessions cleared'); loadSessions(); } catch(e) { toast(e.message, 'error'); }
+}
+
+function copyText(t) { navigator.clipboard.writeText(t).then(() => toast('Copied!')).catch(() => {}); }
+
+checkAuth();
+</script>
+</body>
+</html>
