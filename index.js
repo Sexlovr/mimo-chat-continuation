@@ -42,7 +42,7 @@ function getNextAccount() {
 }
 
 function bumpAccountUsage(accountId) {
-  getDB().prepare('UPDATE accounts SET request_count = request_count + 1, last_used = datetime('now') WHERE id = ?').run(accountId);
+  getDB().prepare("UPDATE accounts SET request_count = request_count + 1, last_used = datetime('now') WHERE id = ?").run(accountId);
 }
 
 // ══════════════════════════════════════════
