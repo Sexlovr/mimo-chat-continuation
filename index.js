@@ -42,7 +42,7 @@ function getNextAccount() {
 }
 
 function bumpAccountUsage(accountId) {
-  getDB().prepare("UPDATE accounts SET request_count = request_count + 1, last_used = datetime('now') WHERE id = ?").run(accountId);
+  getDB().prepare('UPDATE accounts SET request_count = request_count + 1, last_used = datetime('now') WHERE id = ?').run(accountId);
 }
 
 // ══════════════════════════════════════════
@@ -133,6 +133,35 @@ app.patch('/admin/accounts/:id', adminAuth, function (req, res) {
     getDB().prepare('UPDATE accounts SET label = ? WHERE id = ?').run(req.body.label, req.params.id);
   }
   res.json({ message: 'Updated' });
+});
+
+// ── Test Account Credentials ──
+app.post('/admin/accounts/:id/test', adminAuth, async function (req, res) {
+  var account = getDB().prepare('SELECT * FROM accounts WHERE id = ?').get(req.params.id);
+  if (!account) return res.status(404).json({ error: 'Account not found' });
+
+  try {
+    var testResponse = await fetchMimoStream(account, 'hi', {
+      enableThinking: false,
+      webSearchStatus: 'disabled',
+      model: 'mimo-v2.5-pro'
+    }, generateConversationId());
+
+    // Read just enough to confirm it's streaming
+    var reader = testResponse.body.getReader();
+    var { value } = await reader.read();
+    reader.releaseLock();
+
+    var snippet = new TextDecoder().decode(value).slice(0, 200);
+    res.json({ success: true, message: 'Account is valid', snippet: snippet });
+  } catch (err) {
+    var is401 = err.message.includes('401');
+    res.json({
+      success: false,
+      message: err.message.slice(0, 300),
+      hint: is401 ? 'serviceToken is expired or invalid — re-import a fresh cURL from the browser' : 'Unknown error'
+    });
+  }
 });
 
 // ── API Keys ──
@@ -321,7 +350,28 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
     };
 
     // ── Fetch from MiMo ──
-    var mimoResponse = await fetchMimoStream(account, query, modelConfig, mimoConversationId);
+    var mimoResponse;
+    try {
+      mimoResponse = await fetchMimoStream(account, query, modelConfig, mimoConversationId);
+    } catch (fetchErr) {
+      // ── Auto-disable on 401, try next account ──
+      if (fetchErr.message.includes('401')) {
+        console.error('[AUTH] Account ' + account.user_id + ' returned 401 — disabling');
+        db.prepare('UPDATE accounts SET active = 0 WHERE id = ?').run(account.id);
+
+        // Try one more account if available
+        var fallback = getNextAccount();
+        if (fallback && fallback.id !== account.id) {
+          console.log('[AUTH] Retrying with fallback account: ' + fallback.user_id);
+          mimoResponse = await fetchMimoStream(fallback, query, modelConfig, mimoConversationId);
+          bumpAccountUsage(fallback.id);
+        } else {
+          throw new Error('All accounts failed authentication. Please re-import fresh cURL credentials in the admin panel.');
+        }
+      } else {
+        throw fetchErr;
+      }
+    }
 
     var thinkingActive = enableThinking === true;
 
