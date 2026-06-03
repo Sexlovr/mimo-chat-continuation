@@ -15,7 +15,8 @@ import {
   buildOpenAIChunk,
   buildOpenAIResponse,
   generateId,
-  generateConversationId
+  generateConversationId,
+  cleanThinkTags
 } from './lib/translator.js';
 import { buildAdminPage } from './lib/page.js';
 
@@ -473,8 +474,8 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
 
       var result = buildOpenAIResponse(
         completionId, requestedModel,
-        contentParts.join(''),
-        reasoningParts.join('') || undefined,
+        thinkingActive ? contentParts.join('') : cleanThinkTags(contentParts.join('')),
+        thinkingActive ? reasoningParts.join('') : undefined,
         usageData2
       );
 
