@@ -11,7 +11,6 @@ import {
   buildContinuationQuery,
   generateConvKey,
   hashApiKey,
-  ThinkingParser,
   buildOpenAIChunk,
   buildOpenAIResponse,
   generateId,
@@ -376,6 +375,58 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
 
     var thinkingActive = enableThinking === true;
 
+    // ═══════════════════════════════════════════════════════
+    //  SIMPLE APPROACH: Collect ALL text → clean → return
+    //  No broken state-machine parser. Just buffer + regex.
+    // ═══════════════════════════════════════════════════════
+    var allTextChunks = [];
+    var usageData = null;
+
+    try {
+      for await (var event of parseMimoSSE(mimoResponse)) {
+        if (event.event === 'message') {
+          var parsed;
+          try { parsed = JSON.parse(event.data); } catch (e) { continue; }
+          if (parsed.type !== 'text' || parsed.content === undefined) continue;
+          allTextChunks.push(parsed.content);
+        } else if (event.event === 'usage') {
+          try {
+            var u = JSON.parse(event.data);
+            usageData = {
+              prompt_tokens: u.promptTokens || 0,
+              completion_tokens: u.completionTokens || 0,
+              total_tokens: u.totalTokens || 0
+            };
+          } catch (e) { }
+        }
+      }
+    } catch (streamErr) {
+      console.error('[Stream Error]', streamErr.message);
+    }
+
+    // ── Join all chunks into one raw string ──
+    var rawText = allTextChunks.join('').replace(/\u0000/g, '');
+
+    // ── Extract thinking and content ──
+    var reasoning = '';
+    var content = '';
+
+    var thinkMatch = rawText.match(/<think>([\s\S]*?)<\/think>([\s\S]*)/i);
+    if (thinkMatch) {
+      reasoning = thinkMatch[1].trim();
+      content = thinkMatch[2].trim();
+    } else {
+      // No think tags at all, or malformed — clean any stray tags
+      content = cleanThinkTags(rawText);
+    }
+
+    if (process.env.DEBUG === '1') {
+      console.log('[DEBUG] Raw text length:', rawText.length);
+      console.log('[DEBUG] Reasoning length:', reasoning.length);
+      console.log('[DEBUG] Content length:', content.length);
+      console.log('[DEBUG] Content preview:', content.slice(0, 150));
+    }
+
     if (stream) {
       // ═══ STREAMING ═══
       res.setHeader('Content-Type', 'text/event-stream');
@@ -384,99 +435,33 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
       res.setHeader('X-Accel-Buffering', 'no');
       res.setHeader('X-Conversation-Id', convKey);
 
+      // Send role chunk
       res.write(buildOpenAIChunk(completionId, requestedModel, { role: 'assistant', content: '' }, null, null));
 
-      var thinkParser = new ThinkingParser(thinkingActive);
-      var usageData = null;
-
-      try {
-        for await (var event of parseMimoSSE(mimoResponse)) {
-          if (event.event === 'message') {
-            var parsed;
-            try { parsed = JSON.parse(event.data); } catch (e) { continue; }
-            if (parsed.type !== 'text' || parsed.content === undefined) continue;
-
-            var segments = thinkParser.process(parsed.content);
-            for (var i = 0; i < segments.length; i++) {
-              var seg = segments[i];
-              if (seg.type === 'reasoning') {
-                res.write(buildOpenAIChunk(completionId, requestedModel, { reasoning_content: seg.text }, null, null));
-              } else if (seg.text) {
-                res.write(buildOpenAIChunk(completionId, requestedModel, { content: seg.text }, null, null));
-              }
-            }
-          } else if (event.event === 'usage') {
-            try {
-              var u = JSON.parse(event.data);
-              usageData = {
-                prompt_tokens: u.promptTokens || 0,
-                completion_tokens: u.completionTokens || 0,
-                total_tokens: u.totalTokens || 0
-              };
-            } catch (e) { }
-          } else if (event.event === 'finish') {
-            var remaining = thinkParser.flush();
-            for (var i = 0; i < remaining.length; i++) {
-              var seg = remaining[i];
-              if (seg.type === 'reasoning') {
-                res.write(buildOpenAIChunk(completionId, requestedModel, { reasoning_content: seg.text }, null, null));
-              } else if (seg.text) {
-                res.write(buildOpenAIChunk(completionId, requestedModel, { content: seg.text }, null, null));
-              }
-            }
-          }
-        }
-      } catch (streamErr) {
-        console.error('[Stream Error]', streamErr.message);
+      // Send reasoning if thinking is enabled
+      if (thinkingActive && reasoning) {
+        res.write(buildOpenAIChunk(completionId, requestedModel, { reasoning_content: reasoning }, null, null));
       }
 
+      // Send content in small chunks to simulate streaming
+      var CHUNK_SIZE = 20;
+      for (var ci = 0; ci < content.length; ci += CHUNK_SIZE) {
+        var slice = content.slice(ci, ci + CHUNK_SIZE);
+        res.write(buildOpenAIChunk(completionId, requestedModel, { content: slice }, null, null));
+      }
+
+      // Send stop
       res.write(buildOpenAIChunk(completionId, requestedModel, {}, 'stop', usageData));
       res.write('data: [DONE]\n\n');
       res.end();
 
     } else {
       // ═══ NON-STREAMING ═══
-      var thinkParser2 = new ThinkingParser(thinkingActive);
-      var contentParts = [];
-      var reasoningParts = [];
-      var usageData2 = null;
-
-      for await (var event of parseMimoSSE(mimoResponse)) {
-        if (event.event === 'message') {
-          var parsed;
-          try { parsed = JSON.parse(event.data); } catch (e) { continue; }
-          if (parsed.type !== 'text' || parsed.content === undefined) continue;
-
-          var segments = thinkParser2.process(parsed.content);
-          for (var i = 0; i < segments.length; i++) {
-            var seg = segments[i];
-            if (seg.type === 'reasoning') reasoningParts.push(seg.text);
-            else if (seg.text) contentParts.push(seg.text);
-          }
-        } else if (event.event === 'usage') {
-          try {
-            var u = JSON.parse(event.data);
-            usageData2 = {
-              prompt_tokens: u.promptTokens || 0,
-              completion_tokens: u.completionTokens || 0,
-              total_tokens: u.totalTokens || 0
-            };
-          } catch (e) { }
-        } else if (event.event === 'finish') {
-          var remaining = thinkParser2.flush();
-          for (var i = 0; i < remaining.length; i++) {
-            var seg = remaining[i];
-            if (seg.type === 'reasoning') reasoningParts.push(seg.text);
-            else if (seg.text) contentParts.push(seg.text);
-          }
-        }
-      }
-
       var result = buildOpenAIResponse(
         completionId, requestedModel,
-        thinkingActive ? contentParts.join('') : cleanThinkTags(contentParts.join('')),
-        thinkingActive ? reasoningParts.join('') : undefined,
-        usageData2
+        content,
+        thinkingActive && reasoning ? reasoning : undefined,
+        usageData
       );
 
       result['x_conversation_id'] = convKey;
