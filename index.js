@@ -354,19 +354,20 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
     try {
       mimoResponse = await fetchMimoStream(account, query, modelConfig, mimoConversationId);
     } catch (fetchErr) {
-      // ── Auto-disable on 401, try next account ──
-      if (fetchErr.message.includes('401')) {
-        console.error('[AUTH] Account ' + account.user_id + ' returned 401 — disabling');
+      // ── Auto-disable on 401 (Auth) or 451 (Restricted) ──
+      if (fetchErr.message.includes('401') || fetchErr.message.includes('451')) {
+        const errType = fetchErr.message.includes('451') ? '451 (Restricted)' : '401 (Auth Failed)';
+        console.error(`[AUTH] Account ${account.user_id} returned ${errType} — disabling`);
         db.prepare('UPDATE accounts SET active = 0 WHERE id = ?').run(account.id);
 
         // Try one more account if available
         var fallback = getNextAccount();
         if (fallback && fallback.id !== account.id) {
-          console.log('[AUTH] Retrying with fallback account: ' + fallback.user_id);
+          console.log(`[AUTH] Retrying with fallback account: ${fallback.user_id}`);
           mimoResponse = await fetchMimoStream(fallback, query, modelConfig, mimoConversationId);
           bumpAccountUsage(fallback.id);
         } else {
-          throw new Error('All accounts failed authentication. Please re-import fresh cURL credentials in the admin panel.');
+          throw new Error(`All accounts failed or are restricted. Last error: ${errType}. Please add more accounts in the admin panel.`);
         }
       } else {
         throw fetchErr;
