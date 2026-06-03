@@ -299,23 +299,46 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
 
     var query, mimoConversationId, account;
     var isContinuation = false;
+    var isReroll = false;
+    var mimoMsgId = crypto.randomUUID().replace(/-/g, '');
 
-    if (conv && messages.length > conv.message_count) {
-      // ═══ CONTINUATION ═══
-      account = db.prepare('SELECT * FROM accounts WHERE id = ? AND active = 1').get(conv.account_id);
+    if (conv) {
+      if (messages.length > conv.message_count) {
+        // ═══ CONTINUATION ═══
+        account = db.prepare('SELECT * FROM accounts WHERE id = ? AND active = 1').get(conv.account_id);
 
-      if (account) {
-        isContinuation = true;
-        mimoConversationId = conv.mimo_conversation_id;
-        query = buildContinuationQuery(cleanedMessages, resend);
+        if (account) {
+          isContinuation = true;
+          mimoConversationId = conv.mimo_conversation_id;
+          query = buildContinuationQuery(cleanedMessages, resend);
 
-        db.prepare(`UPDATE conversations SET message_count = ?, last_used = datetime('now'), model = ? WHERE id = ?`)
-          .run(messages.length, requestedModel, conv.id);
+          db.prepare(`UPDATE conversations SET message_count = ?, last_used = datetime('now'), model = ?, last_msg_id = ? WHERE id = ?`)
+            .run(messages.length, requestedModel, mimoMsgId, conv.id);
 
-        console.log('[Conv] Continuation: ' + convKey.slice(0, 12) + '... | msgs: ' + conv.message_count + ' -> ' + messages.length + ' | account: ' + account.user_id);
-      } else {
-        db.prepare('DELETE FROM conversations WHERE id = ?').run(conv.id);
-        conv = null;
+          console.log('[Conv] Continuation: ' + convKey.slice(0, 12) + '... | msgs: ' + conv.message_count + ' -> ' + messages.length + ' | account: ' + account.user_id);
+        } else {
+          db.prepare('DELETE FROM conversations WHERE id = ?').run(conv.id);
+          conv = null;
+        }
+      } else if (messages.length === conv.message_count && conv.last_msg_id) {
+        // ═══ REROLL ═══
+        account = db.prepare('SELECT * FROM accounts WHERE id = ? AND active = 1').get(conv.account_id);
+
+        if (account) {
+          isReroll = true;
+          isContinuation = true; // Bypasses new conversation creation
+          mimoConversationId = conv.mimo_conversation_id;
+          mimoMsgId = conv.last_msg_id;
+          query = buildContinuationQuery(cleanedMessages, resend);
+
+          db.prepare(`UPDATE conversations SET last_used = datetime('now'), model = ? WHERE id = ?`)
+            .run(requestedModel, conv.id);
+
+          console.log('[Conv] Reroll: ' + convKey.slice(0, 12) + '... | msgs: ' + messages.length + ' | account: ' + account.user_id);
+        } else {
+          db.prepare('DELETE FROM conversations WHERE id = ?').run(conv.id);
+          conv = null;
+        }
       }
     }
 
@@ -332,8 +355,8 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
       query = buildNewConversationQuery(cleanedMessages);
 
       db.prepare(
-        'INSERT INTO conversations (conv_key, api_key_hash, mimo_conversation_id, account_id, message_count, model) VALUES (?, ?, ?, ?, ?, ?)'
-      ).run(convKey, apiKeyHash, mimoConversationId, account.id, messages.length, requestedModel);
+        'INSERT INTO conversations (conv_key, api_key_hash, mimo_conversation_id, account_id, message_count, model, last_msg_id) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      ).run(convKey, apiKeyHash, mimoConversationId, account.id, messages.length, requestedModel, mimoMsgId);
 
       console.log('[Conv] New: ' + convKey.slice(0, 12) + '... | msgs: ' + messages.length + ' | account: ' + account.user_id);
     }
@@ -352,7 +375,7 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
     // ── Fetch from MiMo ──
     var mimoResponse;
     try {
-      mimoResponse = await fetchMimoStream(account, query, modelConfig, mimoConversationId);
+      mimoResponse = await fetchMimoStream(account, query, modelConfig, mimoConversationId, mimoMsgId);
     } catch (fetchErr) {
       // ── Auto-disable on 401 (Auth) or 451 (Restricted) ──
       if (fetchErr.message.includes('401') || fetchErr.message.includes('451')) {
@@ -364,7 +387,7 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
         var fallback = getNextAccount();
         if (fallback && fallback.id !== account.id) {
           console.log(`[AUTH] Retrying with fallback account: ${fallback.user_id}`);
-          mimoResponse = await fetchMimoStream(fallback, query, modelConfig, mimoConversationId);
+          mimoResponse = await fetchMimoStream(fallback, query, modelConfig, mimoConversationId, mimoMsgId);
           bumpAccountUsage(fallback.id);
         } else {
           throw new Error(`All accounts failed or are restricted. Last error: ${errType}. Please add more accounts in the admin panel.`);
