@@ -309,7 +309,7 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
         mimoConversationId = conv.mimo_conversation_id;
         query = buildContinuationQuery(cleanedMessages, resend);
 
-        db.prepare('UPDATE conversations SET message_count = ?, last_used = datetime("now"), model = ? WHERE id = ?')
+        db.prepare(`UPDATE conversations SET message_count = ?, last_used = datetime('now'), model = ? WHERE id = ?`)
           .run(messages.length, requestedModel, conv.id);
 
         console.log('[Conv] Continuation: ' + convKey.slice(0, 12) + '... | msgs: ' + conv.message_count + ' -> ' + messages.length + ' | account: ' + account.user_id);
