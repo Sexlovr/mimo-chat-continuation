@@ -389,11 +389,19 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
         for await (var event of parseMimoSSE(mimoResponse)) {
           if (event.event === 'message') {
             var parsed;
-            try { parsed = JSON.parse(event.data); } catch (e) { continue; }
+            try { 
+              parsed = JSON.parse(event.data); 
+            } catch (e) { 
+              console.error('[JSON Parse Error]', e.message, 'Raw data:', event.data.slice(0, 100));
+              continue; 
+            }
             if (parsed.type !== 'text' || parsed.content === undefined) continue;
 
+            // Strip literal true null bytes (\x00) immediately
+            var cleanText = parsed.content.replace(/\0/g, '');
+
             // Strict raw passthrough of the exact chunk content
-            res.write(buildOpenAIChunk(completionId, requestedModel, { content: parsed.content }, null, null));
+            res.write(buildOpenAIChunk(completionId, requestedModel, { content: cleanText }, null, null));
           } else if (event.event === 'usage') {
             try {
               var u = JSON.parse(event.data);
