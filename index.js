@@ -373,60 +373,6 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
       }
     }
 
-    var thinkingActive = enableThinking === true;
-
-    // ═══════════════════════════════════════════════════════
-    //  SIMPLE APPROACH: Collect ALL text → clean → return
-    //  No broken state-machine parser. Just buffer + regex.
-    // ═══════════════════════════════════════════════════════
-    var allTextChunks = [];
-    var usageData = null;
-
-    try {
-      for await (var event of parseMimoSSE(mimoResponse)) {
-        if (event.event === 'message') {
-          var parsed;
-          try { parsed = JSON.parse(event.data); } catch (e) { continue; }
-          if (parsed.type !== 'text' || parsed.content === undefined) continue;
-          allTextChunks.push(parsed.content);
-        } else if (event.event === 'usage') {
-          try {
-            var u = JSON.parse(event.data);
-            usageData = {
-              prompt_tokens: u.promptTokens || 0,
-              completion_tokens: u.completionTokens || 0,
-              total_tokens: u.totalTokens || 0
-            };
-          } catch (e) { }
-        }
-      }
-    } catch (streamErr) {
-      console.error('[Stream Error]', streamErr.message);
-    }
-
-    // ── Join all chunks into one raw string ──
-    var rawText = allTextChunks.join('').replace(/\u0000/g, '');
-
-    // ── Extract thinking and content ──
-    var reasoning = '';
-    var content = '';
-
-    var thinkMatch = rawText.match(/<think>([\s\S]*?)<\/think>([\s\S]*)/i);
-    if (thinkMatch) {
-      reasoning = thinkMatch[1].trim();
-      content = thinkMatch[2].trim();
-    } else {
-      // No think tags at all, or malformed — clean any stray tags
-      content = cleanThinkTags(rawText);
-    }
-
-    if (process.env.DEBUG === '1') {
-      console.log('[DEBUG] Raw text length:', rawText.length);
-      console.log('[DEBUG] Reasoning length:', reasoning.length);
-      console.log('[DEBUG] Content length:', content.length);
-      console.log('[DEBUG] Content preview:', content.slice(0, 150));
-    }
-
     if (stream) {
       // ═══ STREAMING ═══
       res.setHeader('Content-Type', 'text/event-stream');
@@ -435,33 +381,72 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
       res.setHeader('X-Accel-Buffering', 'no');
       res.setHeader('X-Conversation-Id', convKey);
 
-      // Send role chunk
       res.write(buildOpenAIChunk(completionId, requestedModel, { role: 'assistant', content: '' }, null, null));
 
-      // Send reasoning if thinking is enabled
-      if (thinkingActive && reasoning) {
-        res.write(buildOpenAIChunk(completionId, requestedModel, { reasoning_content: reasoning }, null, null));
+      var usageData = null;
+
+      try {
+        for await (var event of parseMimoSSE(mimoResponse)) {
+          if (event.event === 'message') {
+            var parsed;
+            try { parsed = JSON.parse(event.data); } catch (e) { continue; }
+            if (parsed.type !== 'text' || parsed.content === undefined) continue;
+
+            // Strict raw passthrough of the exact chunk content
+            res.write(buildOpenAIChunk(completionId, requestedModel, { content: parsed.content }, null, null));
+          } else if (event.event === 'usage') {
+            try {
+              var u = JSON.parse(event.data);
+              usageData = {
+                prompt_tokens: u.promptTokens || 0,
+                completion_tokens: u.completionTokens || 0,
+                total_tokens: u.totalTokens || 0
+              };
+            } catch (e) { }
+          }
+        }
+      } catch (streamErr) {
+        console.error('[Stream Error]', streamErr.message);
       }
 
-      // Send content in small chunks to simulate streaming
-      var CHUNK_SIZE = 20;
-      for (var ci = 0; ci < content.length; ci += CHUNK_SIZE) {
-        var slice = content.slice(ci, ci + CHUNK_SIZE);
-        res.write(buildOpenAIChunk(completionId, requestedModel, { content: slice }, null, null));
-      }
-
-      // Send stop
       res.write(buildOpenAIChunk(completionId, requestedModel, {}, 'stop', usageData));
       res.write('data: [DONE]\n\n');
       res.end();
 
     } else {
       // ═══ NON-STREAMING ═══
+      var allContent = [];
+      var usageData2 = null;
+
+      try {
+        for await (var event of parseMimoSSE(mimoResponse)) {
+          if (event.event === 'message') {
+            var parsed;
+            try { parsed = JSON.parse(event.data); } catch (e) { continue; }
+            if (parsed.type !== 'text' || parsed.content === undefined) continue;
+            allContent.push(parsed.content);
+          } else if (event.event === 'usage') {
+            try {
+              var u = JSON.parse(event.data);
+              usageData2 = {
+                prompt_tokens: u.promptTokens || 0,
+                completion_tokens: u.completionTokens || 0,
+                total_tokens: u.totalTokens || 0
+              };
+            } catch (e) { }
+          }
+        }
+      } catch (streamErr) {
+        console.error('[Stream Error]', streamErr.message);
+      }
+
+      var rawResultText = allContent.join('');
+
       var result = buildOpenAIResponse(
         completionId, requestedModel,
-        content,
-        thinkingActive && reasoning ? reasoning : undefined,
-        usageData
+        rawResultText,
+        undefined,
+        usageData2
       );
 
       result['x_conversation_id'] = convKey;
