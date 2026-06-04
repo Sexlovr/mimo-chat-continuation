@@ -419,11 +419,11 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
         for await (var event of parseMimoSSE(mimoResponse)) {
           if (event.event === 'message') {
             var parsed;
-            try { 
-              parsed = JSON.parse(event.data); 
-            } catch (e) { 
+            try {
+              parsed = JSON.parse(event.data);
+            } catch (e) {
               console.error('[JSON Parse Error]', e.message, 'Raw data:', event.data.slice(0, 100));
-              continue; 
+              continue;
             }
             if (parsed.type !== 'text' || parsed.content === undefined) continue;
 
