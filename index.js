@@ -267,6 +267,12 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
     var temperature = req.body.temperature;
     var top_p = req.body.top_p;
 
+    var abortController = new AbortController();
+    req.on('aborted', () => {
+      console.log('[Proxy] Client explicitly aborted the request mid-stream.');
+      abortController.abort();
+    });
+
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: { message: 'messages array required', type: 'invalid_request' } });
     }
@@ -375,7 +381,7 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
     // ── Fetch from MiMo ──
     var mimoResponse;
     try {
-      mimoResponse = await fetchMimoStream(account, query, modelConfig, mimoConversationId, mimoMsgId);
+      mimoResponse = await fetchMimoStream(account, query, modelConfig, mimoConversationId, mimoMsgId, abortController.signal);
     } catch (fetchErr) {
       // ── Auto-disable on 401 (Auth) or 451 (Restricted) ──
       if (fetchErr.message.includes('401') || fetchErr.message.includes('451')) {
@@ -387,7 +393,7 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
         var fallback = getNextAccount();
         if (fallback && fallback.id !== account.id) {
           console.log(`[AUTH] Retrying with fallback account: ${fallback.user_id}`);
-          mimoResponse = await fetchMimoStream(fallback, query, modelConfig, mimoConversationId, mimoMsgId);
+          mimoResponse = await fetchMimoStream(fallback, query, modelConfig, mimoConversationId, mimoMsgId, abortController.signal);
           bumpAccountUsage(fallback.id);
         } else {
           throw new Error(`All accounts failed or are restricted. Last error: ${errType}. Please add more accounts in the admin panel.`);
@@ -486,13 +492,21 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
     }
 
   } catch (err) {
+    if (err.name === 'AbortError') {
+      console.log('[Abort] Client disconnected, stream terminated.');
+      return res.end();
+    }
     console.error('[/v1/chat/completions Error]', err);
-    res.status(502).json({
-      error: {
-        message: 'Upstream error: ' + err.message,
-        type: 'upstream_error'
-      }
-    });
+    if (!res.headersSent) {
+      res.status(502).json({
+        error: {
+          message: 'Upstream error: ' + err.message,
+          type: 'upstream_error'
+        }
+      });
+    } else {
+      res.end();
+    }
   }
 });
 
