@@ -314,9 +314,11 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
         account = db.prepare('SELECT * FROM accounts WHERE id = ? AND active = 1').get(conv.account_id);
 
         if (account) {
-          isContinuation = true;
           mimoConversationId = conv.mimo_conversation_id;
-          query = buildContinuationQuery(cleanedMessages, resend);
+
+          var isTurnOne = (conv.root_message_count && messages.length === conv.root_message_count) ||
+                          (!conv.root_message_count && cleanedMessages.filter(function(m) { return m.role === 'user'; }).length === 1);
+          query = isTurnOne ? buildNewConversationQuery(cleanedMessages) : buildContinuationQuery(cleanedMessages, resend);
 
           db.prepare(`UPDATE conversations SET message_count = ?, last_used = datetime('now'), model = ?, last_msg_id = ? WHERE id = ?`)
             .run(messages.length, requestedModel, mimoMsgId, conv.id);
@@ -332,10 +334,12 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
 
         if (account) {
           isReroll = true;
-          isContinuation = true; // Bypasses new conversation creation
           mimoConversationId = conv.mimo_conversation_id;
           mimoMsgId = conv.last_msg_id;
-          query = buildContinuationQuery(cleanedMessages, resend);
+          
+          var isTurnOne = (conv.root_message_count && messages.length === conv.root_message_count) ||
+                          (!conv.root_message_count && cleanedMessages.filter(function(m) { return m.role === 'user'; }).length === 1);
+          query = isTurnOne ? buildNewConversationQuery(cleanedMessages) : buildContinuationQuery(cleanedMessages, resend);
 
           db.prepare(`UPDATE conversations SET last_used = datetime('now'), model = ? WHERE id = ?`)
             .run(requestedModel, conv.id);
@@ -361,8 +365,8 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
       query = buildNewConversationQuery(cleanedMessages);
 
       db.prepare(
-        'INSERT INTO conversations (conv_key, api_key_hash, mimo_conversation_id, account_id, message_count, model, last_msg_id) VALUES (?, ?, ?, ?, ?, ?, ?)'
-      ).run(convKey, apiKeyHash, mimoConversationId, account.id, messages.length, requestedModel, mimoMsgId);
+        'INSERT INTO conversations (conv_key, api_key_hash, mimo_conversation_id, account_id, message_count, root_message_count, model, last_msg_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+      ).run(convKey, apiKeyHash, mimoConversationId, account.id, messages.length, messages.length, requestedModel, mimoMsgId);
 
       console.log('[Conv] New: ' + convKey.slice(0, 12) + '... | msgs: ' + messages.length + ' | account: ' + account.user_id);
     }
