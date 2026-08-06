@@ -482,7 +482,6 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
     var cleanedMessages = directives.cleanedMessages;
 
     var apiKeyHash = req.apiKeyHash;
-    var isPro = /pro/i.test(requestedModel);
     var systemText = systemTextOf(cleanedMessages);
     var systemHash = systemText ? sha256(systemText) : '';
     var phEncoded = '';
@@ -504,29 +503,19 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
     };
 
     var query, mimoConversationId, mimoMsgId = generateMsgId();
-    var proCtx = null; // set when pro-marker stamping is needed
+    var proCtx = null;
 
     // ════════════════════════════════════════
-    //  FLASH: stateless full-dump (no markers)
+    //  ALL MODELS: marker-based native continuation
+    //  (MiMo has no flash-like stateless model — both need continuation)
     // ════════════════════════════════════════
-    if (!isPro) {
-      query = dumpMessages(cleanedMessages);
-      mimoConversationId = generateConversationId();
-      console.log('[Flash] msgs=' + messages.length + ' ~' + Math.round(query.length / 4000) + 'k tok conv=' + mimoConversationId.slice(0, 8));
-    }
-
-    // ════════════════════════════════════════
-    //  PRO: marker-based native continuation
-    // ════════════════════════════════════════
-    if (isPro) {
+    {
       var cp = findContinuationParent(cleanedMessages);
 
       if (cp) {
-        // ── CONTINUATION: marker found in previous assistant reply ──
         var row = getMessageByMarker(apiKeyHash, cp.markerId);
         if (row) {
           mimoConversationId = row.mimo_conversation_id;
-          // If system prompt changed since the parent, inject [updated info] silently
           if (systemText && row.system_hash !== systemHash) {
             var upd = '[updated system instructions — the user revised the system prompt; honor the following from now on]\n' + systemText + '\n[end updated system instructions]';
             await sendSilentMiMoTurn(account, mimoConversationId, upd, phEncoded, abortController.signal);
@@ -535,25 +524,21 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
           query = stripMarkers(cp.userText);
           mimoMsgId = generateMsgId();
           proCtx = { apiKeyHash, systemHash };
-          console.log('[Pro] Continue conv=' + mimoConversationId.slice(0, 8) + ' marker=' + cp.markerId.slice(0, 8));
+          console.log('[MiMo] Continue conv=' + mimoConversationId.slice(0, 8) + ' marker=' + cp.markerId.slice(0, 8));
         } else {
-          // marker expired -> fall through to birth
-          console.log('[Pro] marker ' + cp.markerId.slice(0, 8) + ' not found -> re-birth');
+          console.log('[MiMo] marker ' + cp.markerId.slice(0, 8) + ' not found -> re-birth');
           cp = null;
         }
       }
 
       if (!cp) {
-        // ── BIRTH: flatten everything into the first turn ──
         mimoConversationId = generateConversationId();
         var total = dumpMessages(cleanedMessages);
 
         if (total.length <= MAX_PRO_BIRTH) {
           query = total;
-          console.log('[Pro] Birth conv=' + mimoConversationId.slice(0, 8) + ' ~' + Math.round(total.length / 4000) + 'k tok');
+          console.log('[MiMo] Birth conv=' + mimoConversationId.slice(0, 8) + ' ~' + Math.round(total.length / 4000) + 'k tok');
         } else {
-          // ── CHUNKED PRIMING: oversized birth ──
-          // Split into chunks, send each as a silent priming turn, then stream the final query.
           var lastUserIdx = -1;
           for (var i = cleanedMessages.length - 1; i >= 0; i--) {
             if (cleanedMessages[i].role === 'user') { lastUserIdx = i; break; }
@@ -566,7 +551,7 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
           var streamedPrompt = finalChunks.pop();
           silentChunks = silentChunks.concat(finalChunks);
           var totalParts = silentChunks.length + 1;
-          console.log('[Pro] Birth+prime conv=' + mimoConversationId.slice(0, 8) + ' ' + silentChunks.length + ' silent + 1 streamed (~' + Math.round(total.length / 4000) + 'k tok)');
+          console.log('[MiMo] Birth+prime conv=' + mimoConversationId.slice(0, 8) + ' ' + silentChunks.length + ' silent + 1 streamed (~' + Math.round(total.length / 4000) + 'k tok)');
 
           for (var ci = 0; ci < silentChunks.length; ci++) {
             await sendSilentMiMoTurn(account, mimoConversationId, silentChunks[ci], phEncoded, abortController.signal);
