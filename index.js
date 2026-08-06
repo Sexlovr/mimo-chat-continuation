@@ -553,12 +553,22 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
           var totalParts = silentChunks.length + 1;
           console.log('[MiMo] Birth+prime conv=' + mimoConversationId.slice(0, 8) + ' ' + silentChunks.length + ' silent + 1 streamed (~' + Math.round(total.length / 4000) + 'k tok)');
 
+          var primedOk = true;
           for (var ci = 0; ci < silentChunks.length; ci++) {
-            await sendSilentMiMoTurn(account, mimoConversationId, silentChunks[ci], phEncoded, abortController.signal);
+            try {
+              await sendSilentMiMoTurn(account, mimoConversationId, silentChunks[ci], phEncoded, abortController.signal);
+            } catch (primeErr) {
+              console.error('[MiMo] Silent turn ' + (ci+1) + '/' + silentChunks.length + ' failed: ' + primeErr.message + ' — skipping remaining chunks');
+              primedOk = false;
+              break;
+            }
           }
-          query = silentChunks.length
-            ? 'All ' + totalParts + ' parts buffered. Resume normal behavior and respond to the latest user message:\n\n' + streamedPrompt
-            : streamedPrompt;
+          if (primedOk && silentChunks.length) {
+            query = 'All ' + totalParts + ' parts buffered. Resume normal behavior and respond to the latest user message:\n\n' + streamedPrompt;
+          } else {
+            // Priming failed (likely 451 content filter) — send just the final query directly
+            query = streamedPrompt;
+          }
           mimoMsgId = generateMsgId();
         }
         proCtx = { apiKeyHash, systemHash };
