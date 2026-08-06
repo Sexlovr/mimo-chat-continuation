@@ -587,6 +587,10 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
       }
     }
 
+    // Debug header
+    res.setHeader('X-Debug-ProCtx', proCtx ? '1' : '0');
+    res.setHeader('X-Debug-ConvId', (mimoConversationId || '').slice(0, 12));
+
     if (stream) {
       // ═══ STREAMING ═══
       res.setHeader('Content-Type', 'text/event-stream');
@@ -630,14 +634,18 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
 
       // ── Stamp marker for pro continuation ──
       if (proCtx) {
-        var markerId = genMarkerId();
-        storeMessageMarker({
-          markerId, apiKeyHash: proCtx.apiKeyHash,
-          mimoConversationId: mimoConversationId,
-          systemHash: proCtx.systemHash, model: requestedModel
-        });
-        var marker = encodeMarker(markerId);
-        res.write(buildOpenAIChunk(completionId, requestedModel, { content: marker }, null, null));
+        try {
+          var markerId = genMarkerId();
+          storeMessageMarker({
+            markerId, apiKeyHash: proCtx.apiKeyHash,
+            mimoConversationId: mimoConversationId,
+            systemHash: proCtx.systemHash, model: requestedModel
+          });
+          var marker = encodeMarker(markerId);
+          res.write(buildOpenAIChunk(completionId, requestedModel, { content: marker }, null, null));
+        } catch (e) {
+          console.error('[Marker Store Error (stream)]', e.message);
+        }
       }
 
       res.write(buildOpenAIChunk(completionId, requestedModel, {}, 'stop', usageData));
@@ -675,13 +683,17 @@ app.post('/v1/chat/completions', apiKeyAuth, async function (req, res) {
 
       // ── Stamp marker for pro continuation ──
       if (proCtx) {
-        var markerId2 = genMarkerId();
-        storeMessageMarker({
-          markerId: markerId2, apiKeyHash: proCtx.apiKeyHash,
-          mimoConversationId: mimoConversationId,
-          systemHash: proCtx.systemHash, model: requestedModel
-        });
-        rawResultText += encodeMarker(markerId2);
+        try {
+          var markerId2 = genMarkerId();
+          storeMessageMarker({
+            markerId: markerId2, apiKeyHash: proCtx.apiKeyHash,
+            mimoConversationId: mimoConversationId,
+            systemHash: proCtx.systemHash, model: requestedModel
+          });
+          rawResultText += encodeMarker(markerId2);
+        } catch (e) {
+          console.error('[Marker Store Error]', e.message);
+        }
       }
 
       var result = buildOpenAIResponse(
