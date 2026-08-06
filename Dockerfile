@@ -14,6 +14,12 @@ FROM node:20-slim
 
 WORKDIR /app
 
+# Install chromium for the auto-login CDP flow (optional; only needed if you
+# want /admin/accounts/autologin to drive a headless browser).
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends chromium && \
+    rm -rf /var/lib/apt/lists/*
+
 # Copy compiled node_modules from builder
 COPY --from=builder /app/node_modules ./node_modules
 
@@ -22,6 +28,7 @@ COPY package*.json ./
 COPY index.js ./
 COPY lib/ ./lib/
 COPY public/ ./public/
+COPY captures/ ./captures/
 
 # Create persistent data directory
 RUN mkdir -p /data

@@ -2,6 +2,9 @@ import express from 'express';
 import { config } from 'dotenv';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
+import { spawn } from 'child_process';
+import { fileURLToPath } from 'url';
+import path from 'path';
 import { initDB, getDB, cleanupOldConversations } from './lib/database.js';
 import { parseCurl } from './lib/curlParser.js';
 import { fetchMimoStream, parseMimoSSE } from './lib/mimoClient.js';
@@ -18,6 +21,10 @@ import {
   cleanThinkTags
 } from './lib/translator.js';
 import { buildAdminPage } from './lib/page.js';
+
+var __filename = fileURLToPath(import.meta.url);
+var __dirname = path.dirname(__filename);
+var AUTOLOGIN_SCRIPT = path.join(__dirname, 'captures', 'tools', 'autologin.mjs');
 
 config();
 
@@ -117,6 +124,74 @@ app.post('/admin/accounts', adminAuth, function (req, res) {
   var result = getDB().prepare('INSERT INTO accounts (label, service_token, user_id, ph_token) VALUES (?, ?, ?, ?)')
     .run(label || '', parsed.serviceToken, parsed.userId, parsed.phToken);
   res.json({ message: 'Account added', id: result.lastInsertRowid });
+});
+
+// ── Auto-login via CDP (no manual cURL paste needed) ──
+// Two-phase flow because email verification requires user input:
+//   Phase 1: POST /admin/accounts/autologin  {email, password}  -> triggers login + sends email code
+//            Returns {status: 'awaiting_code'} immediately (the script continues running in background,
+//            waiting on stdin for the code).
+//   Phase 2: POST /admin/accounts/autologin/complete  {email, password, code} -> re-runs with --code
+//            and inserts the resulting cookies into the DB.
+//
+// Requires chromium to be available on PATH (or already running on port 9333).
+app.post('/admin/accounts/autologin', adminAuth, async function (req, res) {
+  var email = req.body.email;
+  var password = req.body.password;
+  var code = req.body.code;
+  if (!email || !password) return res.status(400).json({ error: 'email and password required' });
+
+  try {
+    var args = ['--email=' + email, '--password=' + password];
+    if (code) args.push('--code=' + code);
+    var child = spawn('node', [AUTOLOGIN_SCRIPT, ...args], { stdio: ['pipe', 'pipe', 'pipe'] });
+    var stdout = '';
+    var stderr = '';
+    child.stdout.on('data', d => { stdout += d.toString(); });
+    child.stderr.on('data', d => { stderr += d.toString(); });
+
+    // If we got a code, wait for completion (short timeout); otherwise just report awaiting_code
+    if (!code) {
+      // Detach: let it run, but tell client to send the code back via /complete
+      // We can't keep the connection open forever, so we kill after 60s.
+      var timeout = setTimeout(() => { try { child.kill('SIGTERM'); } catch {} }, 60000);
+      child.on('close', () => clearTimeout(timeout));
+      return res.json({
+        status: 'awaiting_code',
+        message: 'Login flow started. Check the email inbox for a 6-digit code, then POST to /admin/accounts/autologin/complete with the same email+password+code.',
+        stderr_snippet: stderr.slice(-300),
+      });
+    }
+
+    // With code, wait for the script to finish (max 90s)
+    var done = await new Promise((resolve) => {
+      var t = setTimeout(() => { try { child.kill('SIGTERM'); } catch {}; resolve({ timedOut: true }); }, 90000);
+      child.on('close', (code) => { clearTimeout(t); resolve({ code }); });
+    });
+
+    if (done.timedOut) return res.status(504).json({ error: 'autologin timed out', stderr: stderr.slice(-500) });
+
+    var line = stdout.split('\n').find(l => l.trim().startsWith('{'));
+    if (!line) return res.status(502).json({ error: 'autologin produced no cookies', stderr: stderr.slice(-800) });
+
+    var parsed = JSON.parse(line);
+    if (!parsed.serviceToken || !parsed.userId || !parsed.phToken) {
+      return res.status(502).json({ error: 'autologin incomplete', stderr: stderr.slice(-800) });
+    }
+
+    // Insert / update account in DB
+    var existing = getDB().prepare('SELECT id FROM accounts WHERE user_id = ?').get(parsed.userId);
+    if (existing) {
+      getDB().prepare('UPDATE accounts SET service_token = ?, ph_token = ?, active = 1 WHERE id = ?')
+        .run(parsed.serviceToken, parsed.phToken, existing.id);
+      return res.json({ message: 'Account refreshed via auto-login', id: existing.id, userId: parsed.userId });
+    }
+    var ins = getDB().prepare('INSERT INTO accounts (label, service_token, user_id, ph_token) VALUES (?, ?, ?, ?)')
+      .run('auto:' + parsed.userId, parsed.serviceToken, parsed.userId, parsed.phToken);
+    return res.json({ message: 'Account added via auto-login', id: ins.lastInsertRowid, userId: parsed.userId });
+  } catch (e) {
+    return res.status(500).json({ error: 'autologin failed: ' + e.message });
+  }
 });
 
 app.delete('/admin/accounts/:id', adminAuth, function (req, res) {
