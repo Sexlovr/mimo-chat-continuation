@@ -114,7 +114,7 @@ function splitIntoChunks(text, maxChars) {
 // Send a silent priming turn to MiMo (for chunked birth). Discards the response.
 async function sendSilentMiMoTurn(account, conversationId, prompt, phEncoded, signal) {
   var msgId = generateMsgId();
-  var cookie = 'serviceToken="' + account.service_token + '"; userId=' + account.user_id + '; xiaomichatbot_ph="' + account.ph_token + '"';
+  var cookie = 'xiaomichatbot_serviceToken="' + account.service_token + '"; userId=' + account.user_id + '; xiaomichatbot_ph="' + account.ph_token + '"';
   var url = 'https://aistudio.xiaomimimo.com/open-apis/bot/chat?xiaomichatbot_ph=' + phEncoded;
   var wrapped =
     'SYSTEM LOADER MODE — buffering input, not a conversation or roleplay. ' +
